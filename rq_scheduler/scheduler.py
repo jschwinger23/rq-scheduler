@@ -13,14 +13,14 @@ from redis import WatchError
 
 from .utils import from_unix, to_unix, get_next_scheduled_time, rationalize_until
 
-logger = logging.getLogger(__name__)
+DEFAULT_LOGGER = logging.getLogger(__name__)
 
 
 class Scheduler(object):
     scheduler_key = 'rq:scheduler'
     scheduled_jobs_key = 'rq:scheduler:scheduled_jobs'
 
-    def __init__(self, queue_name='default', interval=60, connection=None):
+    def __init__(self, queue_name='default', interval=60, connection=None, logger=DEFAULT_LOGGER):
         from rq.connections import resolve_connection
         self.connection = resolve_connection(connection)
         self.queue_name = queue_name
@@ -86,7 +86,7 @@ class Scheduler(object):
             Register scheduler's death and exit
             and remove previously acquired lock and exit.
             """
-            self.log.info('Shutting down RQ scheduler...')
+            self.log.error('Shutting down RQ scheduler...')
             self.register_death()
             self.remove_lock()
             raise SystemExit()
@@ -281,6 +281,7 @@ class Scheduler(object):
                                                 until, withscores=with_times,
                                                 score_cast_func=epoch_to_datetime,
                                                 start=offset, num=length)
+        self.log.error('got jobs until %s from redis: %s', until, job_ids)
         if not with_times:
             job_ids = zip(job_ids, repeat(None))
         jobs = []
@@ -294,6 +295,7 @@ class Scheduler(object):
                     jobs.append(job)
             except NoSuchJobError:
                 # Delete jobs that aren't there from scheduler
+                self.log.error('job not found, about to delete job %s', job_id)
                 self.cancel(job_id)
         return jobs
 
@@ -318,7 +320,7 @@ class Scheduler(object):
         Move a scheduled job to a queue. In addition, it also does puts the job
         back into the scheduler if needed.
         """
-        self.log.debug('Pushing {0} to {1}'.format(job.id, job.origin))
+        self.log.error('Pushing {0} to {1}'.format(job.id, job.origin))
 
         interval = job.meta.get('interval', None)
         repeat = job.meta.get('repeat', None)
@@ -329,8 +331,10 @@ class Scheduler(object):
             job.meta['repeat'] = int(repeat) - 1
 
         queue = self.get_queue_for_job(job)
+        self.log.error('about to enqueue job %s', job.id)
         queue.enqueue_job(job)
         self.connection.zrem(self.scheduled_jobs_key, job.id)
+        self.log.error('about to delete job %s', job.id)
 
         if interval:
             # If this is a repeat job and counter has reached 0, don't repeat
@@ -345,6 +349,7 @@ class Scheduler(object):
             if repeat is not None:
                 if job.meta['repeat'] == 0:
                     return
+            self.log.error('about to zadd the same cronjob %s', job.id)
             self.connection._zadd(self.scheduled_jobs_key,
                                   to_unix(get_next_scheduled_time(cron_string)),
                                   job.id)
@@ -353,7 +358,7 @@ class Scheduler(object):
         """
         Move scheduled jobs into queues.
         """
-        self.log.info('Checking for scheduled jobs...')
+        self.log.error('Checking for scheduled jobs...')
 
         jobs = self.get_jobs_to_queue()
         for job in jobs:
@@ -368,7 +373,7 @@ class Scheduler(object):
         Periodically check whether there's any job that should be put in the queue (score
         lower than current time).
         """
-        self.log.info('Running RQ scheduler...')
+        self.log.error('Running RQ scheduler...')
 
         self.register_birth()
         self._install_signal_handlers()
@@ -378,13 +383,14 @@ class Scheduler(object):
 
                 start_time = time.time()
                 if self.acquire_lock():
+                    self.log.error('about to check if there is something to enqueue')
                     self.enqueue_jobs()
 
                     if burst:
-                        self.log.info('RQ scheduler done, quitting')
+                        self.log.error('RQ scheduler done, quitting')
                         break
                 else:
-                    self.log.info('Waiting for lock...')
+                    self.log.error('Waiting for lock...')
 
                 # Time has already elapsed while enqueuing jobs, so don't wait too long.
                 time.sleep(self._interval - (time.time() - start_time))
