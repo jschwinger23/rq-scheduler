@@ -13,6 +13,31 @@ from redis import WatchError
 
 from .utils import from_unix, to_unix, get_next_scheduled_time, rationalize_until
 
+LOGGING = {
+    'version': 1,
+    'formatters': {
+        'default': {
+            'format': '[%(asctime)s][%(process)d][%(funcName)s][%(message)s]',
+        },
+    },
+    'handlers': {
+        'default': {
+            'level': 'DEBUG',
+            'class': 'logging.StreamHandler',
+            'formatter': 'default',
+        },
+    },
+    'loggers': {
+        'rq_scheduler': {
+            'handlers': ['default'],
+            'propagate': True,
+            'level': 'DEBUG',
+        },
+    },
+}
+
+import logging.config
+logging.config.dictConfig(LOGGING)
 DEFAULT_LOGGER = logging.getLogger(__name__)
 
 
@@ -109,6 +134,7 @@ class Scheduler(object):
                          description=description, timeout=timeout)
         job.origin = queue_name or self.queue_name
         if commit:
+            self.log.error('about to set redis key: %s', job.id)
             job.save()
         return job
 
@@ -136,6 +162,7 @@ class Scheduler(object):
 
         job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout,
                                id=job_id, result_ttl=job_result_ttl, ttl=job_ttl)
+        self.log.error('about to add key into %s: %s', self.scheduled_jobs_key, job.id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(scheduled_time),
                               job.id)
@@ -154,6 +181,7 @@ class Scheduler(object):
 
         job = self._create_job(func, args=args, kwargs=kwargs, timeout=timeout,
                                id=job_id, result_ttl=job_result_ttl, ttl=job_ttl)
+        self.log.error('about to add key into %s: %s', self.scheduled_jobs_key, job.id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(datetime.utcnow() + time_delta),
                               job.id)
@@ -179,7 +207,9 @@ class Scheduler(object):
             job.meta['repeat'] = int(repeat)
         if repeat and interval is None:
             raise ValueError("Can't repeat a job without interval argument")
+        self.log.error('about to set redis key: %s', job.id)
         job.save()
+        self.log.error('about to add key into %s: %s', self.scheduled_jobs_key, job.id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(scheduled_time),
                               job.id)
@@ -203,8 +233,10 @@ class Scheduler(object):
         if repeat is not None:
             job.meta['repeat'] = int(repeat)
 
+        self.log.error('about to set redis key: %s', job.id)
         job.save()
 
+        self.log.error('about to add key into %s: %s', self.scheduled_jobs_key, job.id)
         self.connection._zadd(self.scheduled_jobs_key,
                               to_unix(scheduled_time),
                               job.id)
@@ -216,8 +248,10 @@ class Scheduler(object):
         job_id or a job instance.
         """
         if isinstance(job, Job):
+            self.log.error('about to del job from %s: %s', self.scheduled_jobs_key, job.id)
             self.connection.zrem(self.scheduled_jobs_key, job.id)
         else:
+            self.log.error('about to del job from %s: %s', self.scheduled_jobs_key, job)
             self.connection.zrem(self.scheduled_jobs_key, job)
 
     def __contains__(self, item):
@@ -281,7 +315,7 @@ class Scheduler(object):
                                                 until, withscores=with_times,
                                                 score_cast_func=epoch_to_datetime,
                                                 start=offset, num=length)
-        self.log.error('got jobs until %s from redis: %s', until, job_ids)
+        self.log.error('got jobs until %s from redis zset %s: %s', until, self.scheduled_jobs_key, job_ids)
         if not with_times:
             job_ids = zip(job_ids, repeat(None))
         jobs = []
@@ -295,7 +329,7 @@ class Scheduler(object):
                     jobs.append(job)
             except NoSuchJobError:
                 # Delete jobs that aren't there from scheduler
-                self.log.error('job not found, about to delete job %s', job_id)
+                self.log.error('redis key no found, about to delete job %s', job_id)
                 self.cancel(job_id)
         return jobs
 
